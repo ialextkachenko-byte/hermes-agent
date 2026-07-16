@@ -15108,7 +15108,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 reply_to_message_id=message_id,
                 adapter=adapter,
             )
-            result = await adapter.send(
+            result = await self._send_with_polling_settle(
+                adapter,
                 str(chat_id),
                 "♻ Gateway restarted successfully. Your session continues.",
                 metadata=_non_conversational_metadata(metadata, platform=platform),
@@ -15137,6 +15138,52 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
         finally:
             notify_path.unlink(missing_ok=True)
+
+    async def _send_with_polling_settle(
+        self,
+        adapter,
+        chat_id: str,
+        message: str,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+        settle_timeout: float = 15.0,
+    ):
+        """adapter.send() with one retry after polling health settles.
+
+        Fixes a startup race in TelegramAdapter (introduced by the polling
+        progress health gate): each fresh polling generation flips
+        ``_send_path_degraded=True`` and only clears it after the first
+        successful getUpdates response. Home-channel/restart lifecycle
+        notifications are dispatched immediately after ``[Telegram] Connected``,
+        which lands inside that window and silently drops the message with
+        ``send_path_degraded`` / ``retryable=True``.
+
+        When the adapter surfaces a retryable failure AND exposes a polling
+        progress event, wait (bounded by ``settle_timeout``) for the first
+        successful getUpdates and retry the send exactly once before giving
+        up. Adapters without that machinery just get the original result
+        back unchanged.
+        """
+        if metadata is None:
+            result = await adapter.send(str(chat_id), message)
+        else:
+            result = await adapter.send(str(chat_id), message, metadata=metadata)
+        if result is None or getattr(result, "success", True) is not False:
+            return result
+        if not getattr(result, "retryable", False):
+            return result
+        progress = getattr(adapter, "_polling_progress_event", None)
+        if progress is None or not hasattr(adapter, "_send_path_degraded"):
+            return result
+        try:
+            await asyncio.wait_for(progress.wait(), timeout=settle_timeout)
+        except asyncio.TimeoutError:
+            return result
+        if getattr(adapter, "_send_path_degraded", False):
+            return result
+        if metadata is None:
+            return await adapter.send(str(chat_id), message)
+        return await adapter.send(str(chat_id), message, metadata=metadata)
 
     async def _send_home_channel_startup_notifications(
         self,
@@ -15178,7 +15225,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
                 if metadata:
-                    result = await adapter.send(
+                    result = await self._send_with_polling_settle(
+                        adapter,
                         str(home.chat_id),
                         message,
                         metadata=_non_conversational_metadata(metadata, platform=platform),
@@ -15186,13 +15234,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 else:
                     _startup_meta = _non_conversational_metadata(platform=platform)
                     if _startup_meta:
-                        result = await adapter.send(
+                        result = await self._send_with_polling_settle(
+                            adapter,
                             str(home.chat_id),
                             message,
                             metadata=_startup_meta,
                         )
                     else:
-                        result = await adapter.send(str(home.chat_id), message)
+                        result = await self._send_with_polling_settle(
+                            adapter,
+                            str(home.chat_id),
+                            message,
+                        )
                 if result is not None and getattr(result, "success", True) is False:
                     logger.warning(
                         "Home-channel startup notification failed for %s:%s: %s",
