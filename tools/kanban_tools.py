@@ -1278,6 +1278,7 @@ def _handle_create(args: dict, **kw) -> str:
     if goal_bool_error:
         return tool_error(goal_bool_error)
     goal_max_turns = args.get("goal_max_turns")
+    max_turns_override = args.get("max_turns_override")
     model_override = args.get("model")
     provider_override = args.get("provider")
     if provider_override and not model_override:
@@ -1326,6 +1327,9 @@ def _handle_create(args: dict, **kw) -> str:
                 goal_mode=goal_mode,
                 goal_max_turns=(
                     int(goal_max_turns) if goal_max_turns is not None else None
+                ),
+                max_turns_override=(
+                    int(max_turns_override) if max_turns_override is not None else None
                 ),
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
@@ -2069,6 +2073,15 @@ KANBAN_CREATE_SCHEMA = {
                     "continuation turns the worker may take before the task "
                     "is blocked for review. Ignored unless goal_mode is "
                     "true. Defaults to the goal-engine default (20)."
+                ),
+            },
+            "max_turns_override": {
+                "type": "integer",
+                "description": (
+                    "Per-task tool-calling iteration cap for the dispatched "
+                    "worker (agent max turns). Use for large one-pass cards "
+                    "that need more than the profile default without raising "
+                    "agent.max_turns globally. Omitted = profile default."
                 ),
             },
             "model": {

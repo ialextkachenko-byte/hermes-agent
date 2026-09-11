@@ -980,6 +980,11 @@ class Task:
     # Goal-loop turn budget for ``goal_mode`` workers. ``None`` falls
     # through to the goals engine default (``goals.DEFAULT_MAX_TURNS``).
     goal_max_turns: Optional[int] = None
+    # Per-task agent iteration budget for the dispatched worker. When set,
+    # the dispatcher passes it as ``HERMES_MAX_ITERATIONS`` so the worker's
+    # CLI honours it without touching the profile's ``agent.max_turns``.
+    # ``None`` = worker uses the profile default (no env injection).
+    max_turns_override: Optional[int] = None
     # Originating chat/agent session id, when the task was created from
     # within an agent loop that propagated ``HERMES_SESSION_ID``. NULL for
     # tasks created from the CLI, the dashboard, or any path that doesn't
@@ -1075,6 +1080,11 @@ class Task:
             ),
             goal_max_turns=(
                 row["goal_max_turns"] if "goal_max_turns" in keys and row["goal_max_turns"] else None
+            ),
+            max_turns_override=(
+                row["max_turns_override"]
+                if "max_turns_override" in keys and row["max_turns_override"]
+                else None
             ),
             session_id=(
                 row["session_id"] if "session_id" in keys else None
@@ -1256,6 +1266,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Goal-loop turn budget for ``goal_mode`` workers. NULL = use the
     -- goals-engine default.
     goal_max_turns       INTEGER,
+    -- Per-task tool-calling iteration cap for the worker. When set, the
+    -- dispatcher injects HERMES_MAX_ITERATIONS at spawn. NULL = profile
+    -- default (no override).
+    max_turns_override   INTEGER,
     -- Originating chat/agent session id when the task was created from
     -- inside an agent loop that propagated ``HERMES_SESSION_ID``. NULL
     -- for tasks created from the CLI, dashboard, or any path that doesn't
@@ -2449,6 +2463,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "goal_max_turns", "goal_max_turns INTEGER"
         )
 
+    if "max_turns_override" not in cols:
+        # Per-task agent iteration budget for dispatched workers.
+        _add_column_if_missing(
+            conn, "tasks", "max_turns_override", "max_turns_override INTEGER"
+        )
+
     if "session_id" not in cols:
         # Originating agent/chat session id, populated when the task is
         # created from within an agent loop that propagated
@@ -2973,6 +2993,7 @@ def create_task(
     reasoning_effort: Optional[str] = None,
     goal_mode: bool = False,
     goal_max_turns: Optional[int] = None,
+    max_turns_override: Optional[int] = None,
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
@@ -3017,6 +3038,10 @@ def create_task(
     in its own projects.db, a matching canonical project-linked task in this
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
+
+    ``max_turns_override`` raises the worker's tool-calling iteration cap for
+    this card only (via ``HERMES_MAX_ITERATIONS`` at spawn). ``None`` leaves
+    the assignee profile's ``agent.max_turns`` unchanged.
     """
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
@@ -3292,8 +3317,8 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, max_turns_override, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3318,6 +3343,7 @@ def create_task(
                         reasoning_effort,
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
+                        int(max_turns_override) if max_turns_override is not None else None,
                         session_id,
                     ),
                 )
@@ -9319,6 +9345,8 @@ def _default_spawn(
         env["HERMES_KANBAN_GOAL_MODE"] = "1"
         if task.goal_max_turns is not None:
             env["HERMES_KANBAN_GOAL_MAX_TURNS"] = str(int(task.goal_max_turns))
+    if task.max_turns_override is not None:
+        env["HERMES_MAX_ITERATIONS"] = str(int(task.max_turns_override))
     terminal_timeout = _worker_terminal_timeout_env(
         task.max_runtime_seconds,
         env.get("TERMINAL_TIMEOUT"),
