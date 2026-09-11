@@ -17967,6 +17967,36 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 # Main Entry Point
 # ============================================================================
 
+# agent.error_classifier.FailoverReason values for transient provider/transport
+# failures (not task-logic errors). Kanban workers map these to
+# KANBAN_RATE_LIMIT_EXIT_CODE so the dispatcher releases without burning the
+# failure streak.
+_KANBAN_TRANSIENT_PROVIDER_FAILURE_REASONS = frozenset({
+    "rate_limit",
+    "billing",
+    "timeout",
+    "server_error",
+    "overloaded",
+    "auth",
+})
+
+
+def _resolve_quiet_mode_exit_code(result, *, kanban_worker: bool) -> int:
+    """Exit code for ``hermes chat -q`` / ``-Q`` automation wrappers."""
+    if not isinstance(result, dict) or not result.get("failed"):
+        return 0
+    if kanban_worker:
+        reason = result.get("failure_reason")
+        if reason in _KANBAN_TRANSIENT_PROVIDER_FAILURE_REASONS:
+            try:
+                from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+
+                return KANBAN_RATE_LIMIT_EXIT_CODE
+            except Exception:
+                return 1
+    return 1
+
+
 def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     """Drive a kanban goal_mode worker through the Ralph-style goal loop.
 
@@ -18536,19 +18566,10 @@ def main(
                         # 5-hour quota window can't trip the circuit breaker and
                         # permanently block the card. Non-kanban runs keep the
                         # plain 0/1 contract automation wrappers expect.
-                        _exit_code = 0
-                        if isinstance(result, dict) and result.get("failed"):
-                            _exit_code = 1
-                            if os.environ.get("HERMES_KANBAN_TASK") and result.get(
-                                "failure_reason"
-                            ) in ("rate_limit", "billing"):
-                                try:
-                                    from hermes_cli.kanban_db import (
-                                        KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
-                                    )
-                                    _exit_code = _RL_CODE
-                                except Exception:
-                                    _exit_code = 1
+                        _exit_code = _resolve_quiet_mode_exit_code(
+                            result,
+                            kanban_worker=bool(os.environ.get("HERMES_KANBAN_TASK")),
+                        )
                         sys.exit(_exit_code)
 
                 # Exit with error code if credentials or agent init fails
