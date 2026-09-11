@@ -2878,6 +2878,78 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _routable_provider_override(
+    provider: Optional[str],
+    *,
+    model: Optional[str] = None,
+    hermes_home: Optional[str] = None,
+) -> Optional[str]:
+    """Return a spawn-safe provider identity, or None to omit ``--provider``.
+
+    Bare ``"custom"`` is the resolved *billing class* of every named
+    ``providers:`` / ``custom_providers:`` entry — it is not a routable
+    identity. ``resolve_runtime_provider("custom")`` falls through to the
+    OpenRouter default URL with no API key, and a dispatcher-spawned
+    worker prints ``No API key found for provider 'custom'`` then exits 0
+    (recorded as ``protocol_violation`` / ``pid not alive``). This is the
+    same leak the TUI already heals via ``canonical_custom_identity``.
+
+    Recover ``custom:<name>`` from the model catalog or the configured
+    provider. If recovery fails, drop the override so the worker inherits
+    the assignee profile's ``model.provider`` rather than passing a
+    known-broken ``--provider custom``.
+    """
+    provider = (provider or "").strip() or None
+    if not provider:
+        return None
+    if provider.strip().lower() != "custom":
+        return provider
+
+    def _heal() -> Optional[str]:
+        from hermes_cli.runtime_provider import canonical_custom_identity
+
+        healed = canonical_custom_identity(model=model)
+        if healed and healed.strip().lower() != "custom":
+            return healed
+        return None
+
+    healed: Optional[str] = None
+    try:
+        if hermes_home:
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+
+            token = set_hermes_home_override(hermes_home)
+            try:
+                healed = _heal()
+            finally:
+                reset_hermes_home_override(token)
+        else:
+            healed = _heal()
+    except Exception as exc:
+        _log.debug(
+            "kanban: could not heal provider_override 'custom' (model=%r): %s",
+            model, exc,
+        )
+        healed = None
+
+    if healed:
+        _log.info(
+            "kanban: healed non-routable provider_override 'custom' -> %s (model=%r)",
+            healed, model,
+        )
+        return healed
+
+    _log.warning(
+        "kanban: dropping non-routable provider_override 'custom' "
+        "(model=%r); worker will use the assignee profile's provider",
+        model,
+    )
+    return None
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2951,6 +3023,9 @@ def create_task(
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
+    provider_override = _routable_provider_override(
+        provider_override, model=model_override,
+    )
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
         raise ValueError("title is required")
@@ -3464,6 +3539,8 @@ def set_model_override(
         raise ValueError("provider_override requires a model_override")
     if not model:
         provider = None
+    else:
+        provider = _routable_provider_override(provider, model=model)
     with write_txn(conn):
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (task_id,)
@@ -9221,8 +9298,16 @@ def _default_spawn(
         # resolves the model against the intended backend instead of the
         # profile's configured provider (mixing model X with provider Y is
         # the classic mis-set that stalls a board).
-        if task.provider_override:
-            cmd.extend(["--provider", task.provider_override])
+        # Bare ``"custom"`` is not routable — heal it to ``custom:<name>``
+        # (or drop it) so the worker does not boot with
+        # ``--provider custom`` and immediately exit 0 for missing keys.
+        provider = _routable_provider_override(
+            task.provider_override,
+            model=task.model_override,
+            hermes_home=env.get("HERMES_HOME"),
+        )
+        if provider:
+            cmd.extend(["--provider", provider])
     # Per-task thinking depth. Independent of the model override — a task can
     # run the profile's own model at a different depth — so this is its own
     # branch, not a nested one.

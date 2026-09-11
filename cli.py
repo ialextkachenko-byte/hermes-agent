@@ -18567,6 +18567,13 @@ def main(
                 # above was already banner-free; this brings the human-
                 # facing single-query path in line so all non-interactive
                 # invocations are fast.
+                #
+                # Kanban workers spawn as ``hermes chat -q`` (not ``-Q``).
+                # Credential failure used to fall through to Goodbye +
+                # rc=0, which the dispatcher records as a protocol
+                # violation / ``pid not alive``. Fail closed like ``-Q``.
+                if os.environ.get("HERMES_KANBAN_TASK") and not cli._ensure_runtime_credentials():
+                    sys.exit(1)
                 _query_label = query or ("[image attached]" if single_query_images else "")
                 if _query_label:
                     cli.console.print(f"[bold blue]Query:[/] {_query_label}")

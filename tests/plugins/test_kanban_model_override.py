@@ -149,6 +149,103 @@ def test_spawn_passes_model_and_provider(monkeypatch, tmp_path, conn):
     assert cmd[j + 1] == "openrouter"
 
 
+def test_spawn_heals_bare_custom_provider_override(monkeypatch, tmp_path, conn):
+    """Existing cards persist provider_override='custom' (the billing class).
+
+    The dispatcher must not pass ``--provider custom``: the worker then
+    prints "No API key found for provider 'custom'" and exits 0, which
+    the reap path records as protocol_violation / pid-not-alive.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.canonical_custom_identity",
+        lambda **kw: "custom:tutu",
+    )
+    task = kb.Task(
+        id="t_bare_custom",
+        title="t",
+        body=None,
+        assignee="elias",
+        status="running",
+        priority=0,
+        created_by="test",
+        created_at=1,
+        started_at=None,
+        completed_at=None,
+        workspace_kind="dir",
+        workspace_path=None,
+        claim_lock="lock",
+        claim_expires=None,
+        tenant=None,
+        model_override="deepseek/deepseek-v4-flash-0731",
+        provider_override="custom",
+    )
+    cmd = _spawn_and_capture(monkeypatch, tmp_path, task)
+    assert cmd[cmd.index("-m") + 1] == "deepseek/deepseek-v4-flash-0731"
+    assert cmd[cmd.index("--provider") + 1] == "custom:tutu"
+
+
+def test_spawn_drops_unhealable_bare_custom_provider(monkeypatch, tmp_path, conn):
+    """If the named identity cannot be recovered, omit --provider.
+
+    The worker then inherits the assignee profile's model.provider
+    instead of booting with a known-broken ``--provider custom``.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.canonical_custom_identity",
+        lambda **kw: None,
+    )
+    task = kb.Task(
+        id="t_unhealable_custom",
+        title="t",
+        body=None,
+        assignee="elias",
+        status="running",
+        priority=0,
+        created_by="test",
+        created_at=1,
+        started_at=None,
+        completed_at=None,
+        workspace_kind="dir",
+        workspace_path=None,
+        claim_lock="lock",
+        claim_expires=None,
+        tenant=None,
+        model_override="some-model",
+        provider_override="custom",
+    )
+    cmd = _spawn_and_capture(monkeypatch, tmp_path, task)
+    assert "-m" in cmd
+    assert "--provider" not in cmd
+
+
+def test_create_task_heals_bare_custom_provider(conn, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.canonical_custom_identity",
+        lambda **kw: "custom:tutu",
+    )
+    tid = kb.create_task(
+        conn, title="t", assignee="worker",
+        model_override="deepseek/deepseek-v4-flash-0731",
+        provider_override="custom",
+    )
+    t = kb.get_task(conn, tid)
+    assert t.model_override == "deepseek/deepseek-v4-flash-0731"
+    assert t.provider_override == "custom:tutu"
+
+
+def test_set_model_override_heals_bare_custom_provider(conn, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.canonical_custom_identity",
+        lambda **kw: "custom:tutu",
+    )
+    tid = kb.create_task(conn, title="t", assignee="worker")
+    assert kb.set_model_override(
+        conn, tid, "deepseek/deepseek-v4-flash-0731", provider="custom",
+    )
+    t = kb.get_task(conn, tid)
+    assert t.provider_override == "custom:tutu"
+
+
 # ---------------------------------------------------------------------------
 # Dashboard API — PATCH / bulk / create / model-options
 # ---------------------------------------------------------------------------

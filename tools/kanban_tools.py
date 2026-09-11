@@ -2084,11 +2084,12 @@ KANBAN_CREATE_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Provider the 'model' belongs to (e.g. 'openrouter', "
-                    "'anthropic', 'nous'). Set this whenever the model "
-                    "is not from the assignee profile's configured "
-                    "provider — a model name alone is resolved against "
-                    "the profile's provider and will fail if it belongs "
-                    "to a different one. Requires 'model'."
+                    "'anthropic', 'nous', or a named custom provider like "
+                    "'tutu' / 'custom:tutu'). Never pass bare 'custom' — "
+                    "that is a billing class, not a routable identity, and "
+                    "the worker will fail to start. Set this whenever the "
+                    "model is not from the assignee profile's configured "
+                    "provider. Requires 'model'."
                 ),
             },
             "board": _board_schema_prop(),
