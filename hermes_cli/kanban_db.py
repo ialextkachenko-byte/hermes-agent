@@ -7934,14 +7934,27 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
             fp = _error_fingerprint(error_text)
             is_systemic = _fp_counts.get(fp, 0) >= 3
+            if is_systemic:
+                # Persist the trip threshold on the task so a later
+                # ``recompute_ready(failure_limit=<config>)`` cannot
+                # disagree with this tick's systemic breaker (which used
+                # to pass failure_limit=1 only to ``_record_task_failure``).
+                conn.execute(
+                    "UPDATE tasks SET max_retries = 1 WHERE id = ?",
+                    (tid,),
+                )
             tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
-                failure_limit=1 if is_systemic else None,
+                failure_limit=None,
                 release_claim=False,
                 end_run=False,
-                event_payload_extra={"pid": pid, "claimer": claimer},
+                event_payload_extra={
+                    "pid": pid,
+                    "claimer": claimer,
+                    **({"systemic": True} if is_systemic else {}),
+                },
             )
             if tripped:
                 auto_blocked.append(tid)

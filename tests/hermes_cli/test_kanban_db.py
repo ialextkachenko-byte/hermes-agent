@@ -422,6 +422,47 @@ def test_recompute_ready_honours_dispatcher_failure_limit(kanban_home):
         assert kb.get_task(conn, t2).status == "blocked"
 
 
+def test_systemic_crash_trip_survives_recompute_ready(kanban_home, monkeypatch):
+    """Systemic same-fingerprint crashes must stay blocked across
+    ``recompute_ready`` until an explicit ``unblock_task``."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        task_ids = []
+        for i in range(3):
+            tid = kb.create_task(conn, title=f"sys{i}", assignee="a")
+            task_ids.append(tid)
+            kb.claim_task(conn, tid, claimer=f"{host}:w{i}")
+            pid = 71000 + i
+            conn.execute(
+                "UPDATE tasks SET worker_pid=? WHERE id=?",
+                (pid, tid),
+            )
+            conn.commit()
+            _kb._record_worker_exit(pid, _exited_status(1))
+
+        kb.detect_crashed_workers(conn)
+
+        for tid in task_ids:
+            task = kb.get_task(conn, tid)
+            assert task.status == "blocked", tid
+            assert task.max_retries == 1, tid
+            assert task.consecutive_failures == 1, tid
+
+        assert kb.recompute_ready(conn, failure_limit=_kb.DEFAULT_FAILURE_LIMIT + 5) == 0
+        for tid in task_ids:
+            assert kb.get_task(conn, tid).status == "blocked"
+
+        victim = task_ids[0]
+        assert kb.unblock_task(conn, victim) is True
+        assert kb.get_task(conn, victim).status == "ready"
+        assert kb.get_task(conn, victim).consecutive_failures == 0
+
+
 
 
 # ---------------------------------------------------------------------------
