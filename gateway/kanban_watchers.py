@@ -1171,6 +1171,7 @@ class GatewayKanbanWatchersMixin:
         HEALTH_WINDOW = 6
         bad_ticks = 0
         last_warn_at = 0
+        last_cap_warn_at = 0
         # Avoid hot-looping corrupt-looking board DBs, but do not suppress
         # same-fingerprint retries forever: transient WAL/open races can
         # surface as "database disk image is malformed" for one tick.
@@ -1492,7 +1493,32 @@ class GatewayKanbanWatchersMixin:
                     # Health telemetry (aggregate across boards)
                     ready_pending = await asyncio.to_thread(_ready_nonempty)
                     if ready_pending and not any_spawned:
-                        bad_ticks += 1
+                        cap_idle = await asyncio.to_thread(
+                            _kb.profile_cap_idle_explains_zero_spawns,
+                            results or [],
+                            max_in_progress_per_profile=max_in_progress_per_profile,
+                        )
+                        if cap_idle:
+                            bad_ticks = 0
+                            now_cap = int(time.time())
+                            if (
+                                isinstance(max_in_progress_per_profile, int)
+                                and now_cap - last_cap_warn_at >= 300
+                            ):
+                                deferrals = _kb.flatten_profile_cap_deferrals(
+                                    results or []
+                                )
+                                logger.warning(
+                                    _kb.profile_cap_health_warning(
+                                        deferrals,
+                                        max_in_progress_per_profile=(
+                                            max_in_progress_per_profile
+                                        ),
+                                    )
+                                )
+                                last_cap_warn_at = now_cap
+                        else:
+                            bad_ticks += 1
                     else:
                         bad_ticks = 0
                 if bad_ticks >= HEALTH_WINDOW:

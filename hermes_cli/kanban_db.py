@@ -8385,6 +8385,79 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def flatten_profile_cap_deferrals(
+    board_results: list[tuple[str, Optional["DispatchResult"]]],
+) -> list[tuple[str, str, int]]:
+    """Merge ``skipped_per_profile_capped`` across a multi-board tick."""
+    merged: list[tuple[str, str, int]] = []
+    for _slug, res in board_results:
+        if res is None:
+            continue
+        merged.extend(res.skipped_per_profile_capped)
+    return merged
+
+
+def profile_cap_idle_explains_zero_spawns(
+    board_results: list[tuple[str, Optional["DispatchResult"]]],
+    *,
+    max_in_progress_per_profile: Optional[int],
+) -> bool:
+    """True when spawnable work exists but every such board deferred only
+    because ``max_in_progress_per_profile`` was already saturated."""
+    if (
+        not isinstance(max_in_progress_per_profile, int)
+        or max_in_progress_per_profile < 1
+    ):
+        return False
+    found_spawnable_work = False
+    for slug, res in board_results:
+        conn = None
+        try:
+            conn = connect(board=slug)
+            spawnable = has_spawnable_ready(conn) or has_spawnable_review(
+                conn
+            )
+        except Exception:
+            spawnable = False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        if not spawnable:
+            continue
+        found_spawnable_work = True
+        if res is None:
+            return False
+        if res.spawned or res.auto_blocked:
+            return False
+        if not res.skipped_per_profile_capped:
+            return False
+    return found_spawnable_work
+
+
+def profile_cap_health_warning(
+    deferrals: list[tuple[str, str, int]],
+    *,
+    max_in_progress_per_profile: int,
+) -> str:
+    """Health line when ready work waits on a per-profile concurrency cap."""
+    by_assignee: dict[str, int] = {}
+    for _tid, who, running in deferrals:
+        by_assignee[who] = max(by_assignee.get(who, 0), running)
+    assignee_bits = [
+        f"{who} has {running} worker(s) in flight"
+        for who, running in sorted(by_assignee.items())
+    ]
+    detail = "; ".join(assignee_bits) if assignee_bits else "profile at cap"
+    return (
+        f"kanban dispatcher: per-profile cap hit — {len(deferrals)} task(s) "
+        f"waiting for max_in_progress_per_profile="
+        f"{max_in_progress_per_profile} ({detail})"
+    )
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
